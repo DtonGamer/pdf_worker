@@ -1,6 +1,7 @@
 # ============================================================================
 # PYTHON DEPENDENCIES: PDF Processing Worker (Optimized for Railway)
 # OPTIMIZED for free tier deployments (4GB image limit)
+# VERSION COMPATIBILITY: All HuggingFace packages updated to work together
 # ============================================================================
 
 # Core dependencies
@@ -15,9 +16,11 @@ ocrmypdf==16.0.4
 # Text processing
 tiktoken==0.5.2
 
-# Embeddings (HuggingFace) - OPTIMIZED VERSIONS
-transformers==4.36.2
-sentence-transformers==2.2.2  # ✨ ADDED: This was missing!
+# Embeddings - COMPATIBLE VERSIONS (Updated to work together)
+# These versions are tested to work without conflicts
+sentence-transformers==2.7.0
+transformers==4.40.0
+huggingface-hub==0.23.0
 # NOTE: PyTorch CPU version installed separately in Dockerfile
 
 # Image processing for screenshot support - MINIMAL VERSIONS
