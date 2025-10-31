@@ -1,8 +1,0 @@
-[build]
-builder = "docker"
-
-[deploy]
-startCommand = "python -u worker.py"
-
-[build.environment]
-PYTHON_VERSION = "3.11"
