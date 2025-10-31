@@ -11,13 +11,13 @@ python-dotenv==1.0.0
 
 # PDF processing - LIGHTWEIGHT ALTERNATIVES
 pymupdf==1.23.13
+PyPDF2==3.0.1  # ✨ ADDED: This was missing!
 ocrmypdf==16.0.4
 
 # Text processing
 tiktoken==0.5.2
 
 # Embeddings - COMPATIBLE VERSIONS (Updated to work together)
-# These versions are tested to work without conflicts
 sentence-transformers==2.7.0
 transformers==4.40.0
 huggingface-hub==0.23.0
