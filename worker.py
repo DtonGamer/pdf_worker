@@ -16,7 +16,7 @@ from config import (
     SUPABASE_URL, SUPABASE_SERVICE_KEY, REDIS_URL, 
     QUEUE_NAME, QUEUE_TIMEOUT, TEMP_DIR, BATCH_SIZE,
     HIGH_PRIORITY_QUEUE, DEFAULT_QUEUE, LOW_PRIORITY_QUEUE,
-    PORT, OCR_LANGUAGES  # ✨ Added PORT and OCR_LANGUAGES import
+    PORT, OCR_LANGUAGES
 )
 from ocr_processor import process_pdf_file
 from chunker import chunk_document
@@ -181,6 +181,7 @@ class PDFWorker:
         document_id = job_data['document_id']
         storage_path = job_data['storage_path']
         needs_ocr = job_data.get('needs_ocr', False)
+        user_id = job_data.get('user_id')  # ✨ ADDED: Extract user_id from job data
 
         # Detect file type
         mime_type, _ = mimetypes.guess_type(storage_path)
@@ -190,6 +191,7 @@ class PDFWorker:
         print(f"[{self.worker_id}]    Storage path: {storage_path}")
         print(f"[{self.worker_id}]    File type: {mime_type}")
         print(f"[{self.worker_id}]    Needs OCR: {needs_ocr}")
+        print(f"[{self.worker_id}]    User ID: {user_id}")  # ✨ ADDED: Log user_id
         print(f"{'='*60}\n")
 
         local_path = None
@@ -268,7 +270,8 @@ class PDFWorker:
                     'embedding': embedding,
                     'chunk_index': chunk['index'],
                     'token_count': chunk['token_count'],
-                    'file_type': mime_type  # Store file type for reference
+                    'file_type': mime_type,
+                    'user_id': user_id  # ✨ ADDED: Include user_id in record
                 })
 
             # Insert in batches of 100 using upsert to handle re-processing scenarios
@@ -320,10 +323,10 @@ class PDFWorker:
 
         while True:
             try:
-                # ✨ CHANGED: Use short timeout for health check responsiveness
+                # Use short timeout for health check responsiveness
                 result = self.redis_client.blpop(
                     [HIGH_PRIORITY_QUEUE, DEFAULT_QUEUE, LOW_PRIORITY_QUEUE], 
-                    timeout=QUEUE_TIMEOUT  # Now set to 5 seconds in config.py
+                    timeout=QUEUE_TIMEOUT
                 )
 
                 if result is None:
@@ -463,7 +466,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
 def start_health_server(worker_instance):
     """Start a simple HTTP server for health checks"""
-    # ✨ CHANGED: Use PORT from config (supports both PORT and WEB_PORT env vars)
     server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
     # Attach worker instance to server for metrics access
     server.worker = worker_instance
