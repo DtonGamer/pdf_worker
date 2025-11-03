@@ -285,12 +285,20 @@ class PDFWorker:
             print(f"[{self.worker_id}] ✓ Stored {len(records)} chunks in database")
 
             # Step 7: Mark as completed
-            self.update_status(
-                document_id, 
-                'completed', 
-                f'Successfully processed {len(chunks)} chunks',
-                chunk_count=len(chunks)
-            )
+            self.supabase.table('documents').update({
+    'metadata': {
+        'embedding_model': os.getenv('EMBEDDING_MODEL', 'all-MiniLM-L6-v2'),
+        'embedding_dimensions': EMBEDDING_DIMENSIONS,
+        'processed_at': time.time()
+    }
+}).eq('id', document_id).execute()
+
+self.update_status(
+    document_id, 
+    'completed', 
+    f'Successfully processed {len(chunks)} chunks',
+    chunk_count=len(chunks)
+)
 
             print(f"\n[{self.worker_id}] ✅ Successfully processed document {document_id}")
             print(f"[{self.worker_id}]    Total chunks: {len(chunks)}")
