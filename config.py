@@ -54,7 +54,7 @@ LOW_PRIORITY_QUEUE = os.getenv('LOW_PRIORITY_QUEUE', 'pdf-processing-low')
 
 # For backward compatibility, maintain original queue name as default
 QUEUE_NAME = os.getenv('QUEUE_NAME', DEFAULT_QUEUE)
-QUEUE_TIMEOUT = 5  # ✨ CHANGED: Short timeout for health check responsiveness
+QUEUE_TIMEOUT = 5  # Short timeout for health check responsiveness
 
 # ============================================================================
 # PORT CONFIGURATION (for health checks)
@@ -79,14 +79,13 @@ OCR_DPI = get_env_int('OCR_DPI', 300)
 # ============================================================================
 # EMBEDDING CONFIGURATION
 # ============================================================================
-# Use a better quality model while maintaining efficiency
-# all-MiniLM-L6-v2: 23MB (better quality than L3-v2, same dimensions)
-# paraphrase-MiniLM-L3-v2: 17MB (smallest, kept for reference)
+# ✨ UPDATED: Using BGE-small for better quality, same dimensions
+# BAAI/bge-small-en-v1.5: 384 dimensions, ~130MB, better accuracy than MiniLM
 EMBEDDING_MODEL = os.getenv(
     'EMBEDDING_MODEL', 
-    'all-MiniLM-L6-v2'  # Better quality, still efficient
+    'BAAI/bge-small-en-v1.5'  # ✨ CHANGED from 'all-MiniLM-L6-v2'
 )
-EMBEDDING_DIMENSIONS = 384
+EMBEDDING_DIMENSIONS = 384  # Same as before - no database changes needed!
 
 # ============================================================================
 # TEMP FILE CONFIGURATION
@@ -110,5 +109,6 @@ if __name__ == "__main__":
     print(f"  CHUNK_SIZE: {CHUNK_SIZE}")
     print(f"  CHUNK_OVERLAP: {CHUNK_OVERLAP}")
     print(f"  EMBEDDING_MODEL: {EMBEDDING_MODEL}")
+    print(f"  EMBEDDING_DIMENSIONS: {EMBEDDING_DIMENSIONS}")
     print(f"  OCR_LANGUAGES: {OCR_LANGUAGES}")
     print(f"  OCR_DPI: {OCR_DPI}")
