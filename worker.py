@@ -16,7 +16,7 @@ from config import (
     SUPABASE_URL, SUPABASE_SERVICE_KEY, REDIS_URL, 
     QUEUE_NAME, QUEUE_TIMEOUT, TEMP_DIR, BATCH_SIZE,
     HIGH_PRIORITY_QUEUE, DEFAULT_QUEUE, LOW_PRIORITY_QUEUE,
-    PORT, OCR_LANGUAGES
+    PORT, OCR_LANGUAGES, EMBEDDING_DIMENSIONS
 )
 from ocr_processor import process_pdf_file
 from chunker import chunk_document
@@ -181,7 +181,7 @@ class PDFWorker:
         document_id = job_data['document_id']
         storage_path = job_data['storage_path']
         needs_ocr = job_data.get('needs_ocr', False)
-        user_id = job_data.get('user_id')  # ✨ ADDED: Extract user_id from job data
+        user_id = job_data.get('user_id')
 
         # Detect file type
         mime_type, _ = mimetypes.guess_type(storage_path)
@@ -191,7 +191,7 @@ class PDFWorker:
         print(f"[{self.worker_id}]    Storage path: {storage_path}")
         print(f"[{self.worker_id}]    File type: {mime_type}")
         print(f"[{self.worker_id}]    Needs OCR: {needs_ocr}")
-        print(f"[{self.worker_id}]    User ID: {user_id}")  # ✨ ADDED: Log user_id
+        print(f"[{self.worker_id}]    User ID: {user_id}")
         print(f"{'='*60}\n")
 
         local_path = None
@@ -271,7 +271,7 @@ class PDFWorker:
                     'chunk_index': chunk['index'],
                     'token_count': chunk['token_count'],
                     'file_type': mime_type,
-                    'user_id': user_id  # ✨ ADDED: Include user_id in record
+                    'user_id': user_id
                 })
 
             # Insert in batches of 100 using upsert to handle re-processing scenarios
@@ -284,25 +284,28 @@ class PDFWorker:
 
             print(f"[{self.worker_id}] ✓ Stored {len(records)} chunks in database")
 
-            # Step 7: Mark as completed
+            # Step 7: Update metadata to track embedding model used
+            print(f"[{self.worker_id}] 📝 Updating document metadata...")
             self.supabase.table('documents').update({
-    'metadata': {
-        'embedding_model': os.getenv('EMBEDDING_MODEL', 'all-MiniLM-L6-v2'),
-        'embedding_dimensions': EMBEDDING_DIMENSIONS,
-        'processed_at': time.time()
-    }
-}).eq('id', document_id).execute()
+                'metadata': {
+                    'embedding_model': os.getenv('EMBEDDING_MODEL', 'BAAI/bge-small-en-v1.5'),
+                    'embedding_dimensions': EMBEDDING_DIMENSIONS,
+                    'processed_at': time.time()
+                }
+            }).eq('id', document_id).execute()
 
-self.update_status(
-    document_id, 
-    'completed', 
-    f'Successfully processed {len(chunks)} chunks',
-    chunk_count=len(chunks)
-)
+            # Step 8: Mark as completed
+            self.update_status(
+                document_id, 
+                'completed', 
+                f'Successfully processed {len(chunks)} chunks',
+                chunk_count=len(chunks)
+            )
 
             print(f"\n[{self.worker_id}] ✅ Successfully processed document {document_id}")
             print(f"[{self.worker_id}]    Total chunks: {len(chunks)}")
-            print(f"[{self.worker_id}]    Used OCR: {used_ocr}\n")
+            print(f"[{self.worker_id}]    Used OCR: {used_ocr}")
+            print(f"[{self.worker_id}]    Embedding model: {os.getenv('EMBEDDING_MODEL', 'BAAI/bge-small-en-v1.5')}\n")
 
         except Exception as e:
             error_msg = str(e)
