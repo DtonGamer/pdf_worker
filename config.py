@@ -1,4 +1,4 @@
- """
+"""
 Configuration management for PDF processing worker
 """
 import os
