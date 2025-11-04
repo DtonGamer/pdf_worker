@@ -15,7 +15,6 @@ import mimetypes
 from config import (
     SUPABASE_URL, SUPABASE_SERVICE_KEY, REDIS_URL, 
     QUEUE_NAME, QUEUE_TIMEOUT, TEMP_DIR, BATCH_SIZE,
-    HIGH_PRIORITY_QUEUE, DEFAULT_QUEUE, LOW_PRIORITY_QUEUE,
     PORT, OCR_LANGUAGES, EMBEDDING_DIMENSIONS
 )
 from ocr_processor import process_pdf_file
@@ -307,6 +306,9 @@ class PDFWorker:
             print(f"[{self.worker_id}]    Used OCR: {used_ocr}")
             print(f"[{self.worker_id}]    Embedding model: {os.getenv('EMBEDDING_MODEL', 'BAAI/bge-small-en-v1.5')}\n")
 
+            # Update metrics
+            self.jobs_processed += 1
+
         except Exception as e:
             error_msg = str(e)
             print(f"\n[{self.worker_id}] ❌ Error processing document {document_id}: {error_msg}")
@@ -335,10 +337,7 @@ class PDFWorker:
         while True:
             try:
                 # Use short timeout for health check responsiveness
-                result = self.redis_client.blpop(
-                    [HIGH_PRIORITY_QUEUE, DEFAULT_QUEUE, LOW_PRIORITY_QUEUE], 
-                    timeout=QUEUE_TIMEOUT
-                )
+                result = self.redis_client.blpop(QUEUE_NAME, timeout=QUEUE_TIMEOUT)
 
                 if result is None:
                     # Timeout - no jobs available
@@ -353,8 +352,8 @@ class PDFWorker:
                 if isinstance(job_data, list) and len(job_data) > 0:
                     job_data = job_data[0]
 
-                # Process the document with retry logic
-                self.process_document_with_retry(job_data)
+                # Process the document
+                self.process_document(job_data)
 
             except KeyboardInterrupt:
                 print(f"\n\n[{self.worker_id}] 🛑 Worker stopped by user")
@@ -365,77 +364,6 @@ class PDFWorker:
                 print(traceback.format_exc())
                 # Wait a bit before continuing
                 time.sleep(5)
-
-    def process_document_with_retry(self, job_data: Dict[str, Any], max_retries: int = 3):
-        """
-        Process a document with retry logic for transient failures
-        
-        Args:
-            job_data: Job information from queue
-            max_retries: Maximum number of retry attempts
-        """
-        document_id = job_data['document_id']
-        retry_count = job_data.get('retry_count', 0)
-
-        for attempt in range(max_retries + 1):
-            try:
-                # Process the document
-                self.process_document(job_data)
-
-                # If successful, update metrics and return
-                self.jobs_processed += 1
-                return
-            except Exception as e:
-                if attempt < max_retries:
-                    # Exponential backoff: 5s, 10s, 20s with jitter
-                    wait_time = (2 ** attempt) * 5 + (time.time() % 3)  # Add jitter
-                    print(f"[{self.worker_id}] Attempt {attempt + 1} failed, retrying in {wait_time:.1f}s: {e}")
-
-                    # Update job with retry info and re-queue
-                    job_data['retry_count'] = retry_count + 1
-                    # Add timestamp to track retry attempts
-                    job_data['last_retry'] = time.time()
-
-                    # Determine original queue for this job based on priority
-                    original_queue = self._get_original_queue(job_data)
-
-                    # Put the job back in the appropriate queue
-                    self.redis_client.lpush(original_queue, json.dumps(job_data))
-                    return
-                else:
-                    # Final failure - mark as failed after all retries
-                    print(f"[{self.worker_id}] Document {document_id} failed after {max_retries + 1} attempts")
-                    error_msg = str(e)
-
-                    self.update_status(
-                        document_id,
-                        'failed',
-                        f'Processing failed after {max_retries + 1} attempts',
-                        error=error_msg
-                    )
-                    # Still increment jobs_processed since we tried to process it
-                    self.jobs_processed += 1
-                    return
-
-    def _get_original_queue(self, job_data: Dict[str, Any]) -> str:
-        """
-        Determine the original queue for a job based on its priority
-        
-        Args:
-            job_data: Job information from queue
-            
-        Returns:
-            Queue name string
-        """
-        # Check if priority is specified in job data, otherwise use default
-        priority = job_data.get('priority', 'normal')
-
-        if priority == 'high':
-            return HIGH_PRIORITY_QUEUE
-        elif priority == 'low':
-            return LOW_PRIORITY_QUEUE
-        else:
-            return DEFAULT_QUEUE  # Normal priority
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
