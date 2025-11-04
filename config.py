@@ -1,6 +1,5 @@
-"""
+ """
 Configuration management for PDF processing worker
-Fixed to handle environment variables with extra quotes (Zeabur issue)
 """
 import os
 from dotenv import load_dotenv
@@ -47,13 +46,8 @@ REDIS_URL = os.getenv('REDIS_URL')
 if not REDIS_URL:
     raise ValueError("REDIS_URL must be set")
 
-# Queue configuration for priority support
-HIGH_PRIORITY_QUEUE = os.getenv('HIGH_PRIORITY_QUEUE', 'pdf-processing-high')
-DEFAULT_QUEUE = os.getenv('DEFAULT_QUEUE', 'pdf-processing')
-LOW_PRIORITY_QUEUE = os.getenv('LOW_PRIORITY_QUEUE', 'pdf-processing-low')
-
-# For backward compatibility, maintain original queue name as default
-QUEUE_NAME = os.getenv('QUEUE_NAME', DEFAULT_QUEUE)
+# Single queue configuration
+QUEUE_NAME = os.getenv('QUEUE_NAME', 'pdf-processing')
 QUEUE_TIMEOUT = 5  # Short timeout for health check responsiveness
 
 # ============================================================================
@@ -63,7 +57,7 @@ QUEUE_TIMEOUT = 5  # Short timeout for health check responsiveness
 PORT = int(os.getenv('PORT', os.getenv('WEB_PORT', '8080')))
 
 # ============================================================================
-# PROCESSING CONFIGURATION - FIXED FOR ALL PLATFORMS
+# PROCESSING CONFIGURATION
 # ============================================================================
 # Ultra-small batch sizes for 512MB RAM limit (Render free tier)
 BATCH_SIZE = get_env_int('BATCH_SIZE', 4)  # Reduced to 4 for extreme memory constraint
@@ -79,13 +73,11 @@ OCR_DPI = get_env_int('OCR_DPI', 300)
 # ============================================================================
 # EMBEDDING CONFIGURATION
 # ============================================================================
-# ✨ UPDATED: Using BGE-small for better quality, same dimensions
-# BAAI/bge-small-en-v1.5: 384 dimensions, ~130MB, better accuracy than MiniLM
 EMBEDDING_MODEL = os.getenv(
     'EMBEDDING_MODEL', 
-    'BAAI/bge-small-en-v1.5'  # ✨ CHANGED from 'all-MiniLM-L6-v2'
+    'BAAI/bge-small-en-v1.5'
 )
-EMBEDDING_DIMENSIONS = 384  # Same as before - no database changes needed!
+EMBEDDING_DIMENSIONS = 384
 
 # ============================================================================
 # TEMP FILE CONFIGURATION
@@ -104,6 +96,7 @@ LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 if __name__ == "__main__":
     print("Configuration loaded:")
     print(f"  PORT: {PORT}")
+    print(f"  QUEUE_NAME: {QUEUE_NAME}")
     print(f"  QUEUE_TIMEOUT: {QUEUE_TIMEOUT}s")
     print(f"  BATCH_SIZE: {BATCH_SIZE}")
     print(f"  CHUNK_SIZE: {CHUNK_SIZE}")
