@@ -270,7 +270,8 @@ class PDFWorker:
                     'chunk_index': chunk['index'],
                     'token_count': chunk['token_count'],
                     'file_type': mime_type,
-                    'user_id': user_id
+                    'user_id': user_id,
+                    'metadata': {}
                 })
 
             # Insert in batches of 100 using upsert to handle re-processing scenarios
