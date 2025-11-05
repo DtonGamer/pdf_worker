@@ -13,6 +13,7 @@ python-dotenv==1.0.0
 pymupdf==1.23.13
 PyPDF2==3.0.1  # ✨ ADDED: This was missing!
 ocrmypdf==16.0.4
+pillow-jpls==1.0.4
 
 # Text processing
 tiktoken==0.5.2
