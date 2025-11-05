@@ -12,7 +12,7 @@ python-dotenv==1.0.0
 # PDF processing - LIGHTWEIGHT ALTERNATIVES
 pymupdf==1.23.13
 PyPDF2==3.0.1  # ✨ ADDED: This was missing!
-ocrmypdf==16.0.4
+ocrmypdf==16.11.1
 pillow-jpls==1.0.0
 
 # Text processing
