@@ -39,18 +39,6 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
     raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set")
 
 # ============================================================================
-# REDIS CONFIGURATION
-# ============================================================================
-REDIS_URL = os.getenv('REDIS_URL')
-
-if not REDIS_URL:
-    raise ValueError("REDIS_URL must be set")
-
-# Single queue configuration
-QUEUE_NAME = os.getenv('QUEUE_NAME', 'pdf-processing')
-QUEUE_TIMEOUT = 5  # Short timeout for health check responsiveness
-
-# ============================================================================
 # PORT CONFIGURATION (for health checks)
 # ============================================================================
 # Support both PORT (Railway/Render) and WEB_PORT (Zeabur)
@@ -59,10 +47,9 @@ PORT = int(os.getenv('PORT', os.getenv('WEB_PORT', '8080')))
 # ============================================================================
 # PROCESSING CONFIGURATION
 # ============================================================================
-# Ultra-small batch sizes for 512MB RAM limit (Render free tier)
-BATCH_SIZE = get_env_int('BATCH_SIZE', 4)  # Reduced to 4 for extreme memory constraint
-CHUNK_SIZE = get_env_int('CHUNK_SIZE', 500)  # tokens
-CHUNK_OVERLAP = get_env_int('CHUNK_OVERLAP', 50)  # tokens
+BATCH_SIZE = get_env_int('BATCH_SIZE', 4)
+CHUNK_SIZE = get_env_int('CHUNK_SIZE', 500)      # tokens
+CHUNK_OVERLAP = get_env_int('CHUNK_OVERLAP', 50) # tokens
 
 # ============================================================================
 # OCR CONFIGURATION
@@ -74,7 +61,7 @@ OCR_DPI = get_env_int('OCR_DPI', 300)
 # EMBEDDING CONFIGURATION
 # ============================================================================
 EMBEDDING_MODEL = os.getenv(
-    'EMBEDDING_MODEL', 
+    'EMBEDDING_MODEL',
     'BAAI/bge-small-en-v1.5'
 )
 EMBEDDING_DIMENSIONS = 384
@@ -96,8 +83,6 @@ LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 if __name__ == "__main__":
     print("Configuration loaded:")
     print(f"  PORT: {PORT}")
-    print(f"  QUEUE_NAME: {QUEUE_NAME}")
-    print(f"  QUEUE_TIMEOUT: {QUEUE_TIMEOUT}s")
     print(f"  BATCH_SIZE: {BATCH_SIZE}")
     print(f"  CHUNK_SIZE: {CHUNK_SIZE}")
     print(f"  CHUNK_OVERLAP: {CHUNK_OVERLAP}")
