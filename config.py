@@ -62,7 +62,7 @@ OCR_DPI = get_env_int('OCR_DPI', 300)
 # ============================================================================
 EMBEDDING_MODEL = os.getenv(
     'EMBEDDING_MODEL',
-    'BAAI/bge-small-en-v1.5'
+    'all-MiniLM-L6-v2'
 )
 EMBEDDING_DIMENSIONS = 384
 
