@@ -6,15 +6,14 @@ import json
 import time
 import traceback
 from typing import Dict, Any
-import redis
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 from supabase import create_client, Client
 import mimetypes
 
 from config import (
-    SUPABASE_URL, SUPABASE_SERVICE_KEY, REDIS_URL, 
-    QUEUE_NAME, QUEUE_TIMEOUT, TEMP_DIR, BATCH_SIZE,
+    SUPABASE_URL, SUPABASE_SERVICE_KEY,
+    TEMP_DIR, BATCH_SIZE,
     PORT, OCR_LANGUAGES, EMBEDDING_DIMENSIONS
 )
 from ocr_processor import process_pdf_file
@@ -34,12 +33,9 @@ class PDFWorker:
         self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         print(f"[{self.worker_id}] ✓ Connected to Supabase")
 
-        # Initialize Redis client
-        self.redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-        self.redis_client.ping()
-        print(f"[{self.worker_id}] ✓ Connected to Redis")
-
-        print(f"[{self.worker_id}] ✓ Listening to queue: {QUEUE_NAME}")
+        # No Redis — polling processing_queue table instead
+        self.poll_interval = int(os.getenv('POLL_INTERVAL', '5'))  # seconds
+        print(f"[{self.worker_id}] ✓ Polling processing_queue every {self.poll_interval}s")
         print(f"[{self.worker_id}] ✓ Temp directory: {TEMP_DIR}")
         print(f"[{self.worker_id}] 🎯 Worker ready. Waiting for jobs...\n")
 
@@ -47,11 +43,11 @@ class PDFWorker:
         self.jobs_processed = 0
         self.start_time = time.time()
 
-    def update_status(self, document_id: str, status: str, message: str = None, 
+    def update_status(self, document_id: str, status: str, message: str = None,
                      chunk_count: int = None, error: str = None):
         """
         Update document status in database
-        
+
         Args:
             document_id: Document UUID
             status: New status
@@ -87,12 +83,12 @@ class PDFWorker:
     def download_file(self, storage_path: str, document_id: str, mime_type: str) -> str:
         """
         Download file from Supabase storage based on file type
-        
+
         Args:
             storage_path: Path in storage bucket
             document_id: Document UUID
             mime_type: MIME type of the file
-            
+
         Returns:
             Local file path
         """
@@ -124,10 +120,10 @@ class PDFWorker:
     def process_image_file(self, image_path: str) -> tuple[str, bool]:
         """
         Process an image file using OCR to extract text
-        
+
         Args:
             image_path: Path to the image file
-            
+
         Returns:
             Tuple of (extracted_text, used_ocr)
         """
@@ -173,7 +169,7 @@ class PDFWorker:
     def process_document(self, job_data: Dict[str, Any]):
         """
         Process a single document (supports PDFs and images)
-        
+
         Args:
             job_data: Job information from queue
         """
@@ -243,8 +239,8 @@ class PDFWorker:
                 # Update progress
                 progress = int((batch_idx / len(chunks)) * 100)
                 self.update_status(
-                    document_id, 
-                    'processing', 
+                    document_id,
+                    'processing',
                     f'Generating embeddings: {progress}%...'
                 )
 
@@ -278,7 +274,6 @@ class PDFWorker:
             insert_batch_size = 100
             for i in range(0, len(records), insert_batch_size):
                 batch = records[i:i + insert_batch_size]
-                # Using upsert with conflict resolution on document_id and chunk_index
                 self.supabase.table('knowledge_base').upsert(batch, on_conflict='document_id,chunk_index').execute()
                 print(f"[{self.worker_id}]   Upserted {min(i + insert_batch_size, len(records))}/{len(records)} chunks")
 
@@ -296,8 +291,8 @@ class PDFWorker:
 
             # Step 8: Mark as completed
             self.update_status(
-                document_id, 
-                'completed', 
+                document_id,
+                'completed',
                 f'Successfully processed {len(chunks)} chunks',
                 chunk_count=len(chunks)
             )
@@ -332,29 +327,41 @@ class PDFWorker:
                     print(f"[{self.worker_id}] ⚠️  Failed to clean up temp file: {e}")
 
     def run(self):
-        """Main worker loop"""
+        """Main worker loop - polls processing_queue table instead of Redis"""
         print(f"[{self.worker_id}] 🔄 Worker loop started\n")
 
         while True:
             try:
-                # Use short timeout for health check responsiveness
-                result = self.redis_client.blpop(QUEUE_NAME, timeout=QUEUE_TIMEOUT)
+                # Claim one pending job
+                result = (
+                    self.supabase.table('processing_queue')
+                    .select('*')
+                    .eq('status', 'queued')
+                    .order('created_at')
+                    .limit(1)
+                    .execute()
+                )
 
-                if result is None:
-                    # Timeout - no jobs available
-                    # This is normal, just continue waiting
+                if not result.data:
+                    time.sleep(self.poll_interval)
                     continue
 
-                # Parse job data
-                queue_name, job_json = result
-                job_data = json.loads(job_json)
+                job_row = result.data[0]
+                job_id = job_row['id']
+                job_data = job_row['job_data']
 
-                # Handle case where job_data is a list containing one dictionary
-                if isinstance(job_data, list) and len(job_data) > 0:
-                    job_data = job_data[0]
+                # Mark as processing so another worker won't pick it up
+                self.supabase.table('processing_queue').update({
+                    'status': 'processing'
+                }).eq('id', job_id).eq('status', 'queued').execute()
 
                 # Process the document
                 self.process_document(job_data)
+
+                # Mark job as done
+                self.supabase.table('processing_queue').update({
+                    'status': 'completed'
+                }).eq('id', job_id).execute()
 
             except KeyboardInterrupt:
                 print(f"\n\n[{self.worker_id}] 🛑 Worker stopped by user")
@@ -363,7 +370,6 @@ class PDFWorker:
             except Exception as e:
                 print(f"\n[{self.worker_id}] ❌ Unexpected error in worker loop: {e}")
                 print(traceback.format_exc())
-                # Wait a bit before continuing
                 time.sleep(5)
 
 
@@ -375,18 +381,25 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'Worker is running')
         elif self.path == '/metrics':
-            # Return processing metrics
             import psutil
             process = psutil.Process()
             memory_usage_mb = process.memory_info().rss / 1024 / 1024
 
-            # Get worker instance to access metrics
             worker = getattr(self.server, 'worker', None)
+
+            # Get queue length from Postgres
+            queue_length = 0
+            if worker:
+                try:
+                    res = worker.supabase.table('processing_queue').select('id', count='exact').eq('status', 'queued').execute()
+                    queue_length = res.count or 0
+                except Exception:
+                    pass
 
             metrics = {
                 'worker_id': getattr(worker, 'worker_id', 'unknown'),
                 'jobs_processed': getattr(worker, 'jobs_processed', 0),
-                'current_queue_length': getattr(worker, 'redis_client', redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379'), decode_responses=True)).llen(os.getenv('QUEUE_NAME', 'pdf-processing')) if worker else 0,
+                'current_queue_length': queue_length,
                 'uptime_seconds': time.time() - getattr(worker, 'start_time', time.time()),
                 'memory_usage_mb': round(memory_usage_mb, 2),
                 'timestamp': time.time()
@@ -400,14 +413,12 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def log_message(self, format, *args):
-        # Suppress HTTP logs
         pass
 
 
 def start_health_server(worker_instance):
     """Start a simple HTTP server for health checks"""
     server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
-    # Attach worker instance to server for metrics access
     server.worker = worker_instance
     server.start_time = time.time()
     print(f"[{worker_instance.worker_id}] ✓ Health check server listening on port {PORT}")
@@ -417,14 +428,11 @@ def start_health_server(worker_instance):
 def main():
     """Entry point"""
     try:
-        # Start worker first
         worker = PDFWorker()
 
-        # Start health check server in background thread, passing worker instance
         health_thread = threading.Thread(target=start_health_server, daemon=True, args=(worker,))
         health_thread.start()
 
-        # Start worker loop
         worker.run()
     except Exception as e:
         print(f"\n❌ Fatal error: {e}")
