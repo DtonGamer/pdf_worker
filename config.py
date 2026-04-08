@@ -62,7 +62,7 @@ OCR_DPI = get_env_int('OCR_DPI', 300)
 # ============================================================================
 EMBEDDING_MODEL = os.getenv(
     'EMBEDDING_MODEL',
-    'all-MiniLM-L6-v2'
+    'sentence-transformers/all-MiniLM-L6-v2'
 )
 EMBEDDING_DIMENSIONS = 384
 
