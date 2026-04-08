@@ -300,6 +300,9 @@ class PDFWorker:
                 error=error_msg
             )
 
+            # Re-raise so the run() loop can mark the queue row as failed
+            raise
+
         finally:
             if local_path and os.path.exists(local_path):
                 try:
@@ -336,11 +339,21 @@ class PDFWorker:
                     'status': 'processing'
                 }).eq('id', job_id).eq('status', 'queued').execute()
 
-                self.process_document(job_data)
-
-                self.supabase.table('processing_queue').update({
-                    'status': 'completed'
-                }).eq('id', job_id).execute()
+                # Process the document and update the queue row accordingly.
+                # If process_document raises, mark the queue row as failed
+                # so it is never left stuck in 'processing' indefinitely.
+                try:
+                    self.process_document(job_data)
+                    self.supabase.table('processing_queue').update({
+                        'status': 'completed',
+                        'processed_at': 'now()'
+                    }).eq('id', job_id).execute()
+                except Exception as e:
+                    print(f"[{self.worker_id}] ❌ Marking queue job {job_id} as failed")
+                    self.supabase.table('processing_queue').update({
+                        'status': 'failed',
+                        'processed_at': 'now()'
+                    }).eq('id', job_id).execute()
 
             except KeyboardInterrupt:
                 print(f"\n\n[{self.worker_id}] 🛑 Worker stopped by user")
