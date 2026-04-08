@@ -10,6 +10,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 from supabase import create_client, Client
 import mimetypes
+import chardet
 
 from config import (
     SUPABASE_URL, SUPABASE_SERVICE_KEY,
@@ -45,16 +46,7 @@ class PDFWorker:
 
     def update_status(self, document_id: str, status: str, message: str = None,
                      chunk_count: int = None, error: str = None):
-        """
-        Update document status in database
-
-        Args:
-            document_id: Document UUID
-            status: New status
-            message: Status message
-            chunk_count: Number of chunks processed
-            error: Error message if failed
-        """
+        """Update document status in database"""
         try:
             update_data = {
                 'status': status,
@@ -81,52 +73,60 @@ class PDFWorker:
             print(f"⚠️  Failed to update status: {e}")
 
     def download_file(self, storage_path: str, document_id: str, mime_type: str) -> str:
-        """
-        Download file from Supabase storage based on file type
-
-        Args:
-            storage_path: Path in storage bucket
-            document_id: Document UUID
-            mime_type: MIME type of the file
-
-        Returns:
-            Local file path
-        """
-        # Determine file extension based on MIME type
+        """Download file from Supabase storage"""
         if mime_type and mime_type.startswith('image/'):
             ext = mime_type.split('/')[-1]
             if ext == 'jpeg':
                 ext = 'jpg'
         elif mime_type == 'application/pdf':
             ext = 'pdf'
+        elif mime_type == 'text/plain':
+            ext = 'txt'
         else:
-            ext = 'bin'  # Default extension
+            ext = 'bin'
 
         local_path = os.path.join(TEMP_DIR, f"{document_id}.{ext}")
 
         try:
-            # Download file from storage
             response = self.supabase.storage.from_('documents').download(storage_path)
-
-            # Save to local file
             with open(local_path, 'wb') as f:
                 f.write(response)
-
             return local_path
 
         except Exception as e:
             raise Exception(f"Failed to download file: {e}")
 
-    def process_image_file(self, image_path: str) -> tuple[str, bool]:
+    def process_text_file(self, file_path: str) -> tuple[str, bool]:
         """
-        Process an image file using OCR to extract text
-
-        Args:
-            image_path: Path to the image file
+        Read a plain text file, auto-detecting encoding.
 
         Returns:
             Tuple of (extracted_text, used_ocr)
         """
+        print(f"[{self.worker_id}] 📖 Reading text file...")
+
+        with open(file_path, 'rb') as f:
+            raw_bytes = f.read()
+
+        # Detect encoding
+        detected = chardet.detect(raw_bytes)
+        encoding = detected.get('encoding') or 'utf-8'
+        confidence = detected.get('confidence', 0)
+        print(f"[{self.worker_id}] 🔍 Detected encoding: {encoding} (confidence: {confidence:.0%})")
+
+        try:
+            text = raw_bytes.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            # Fall back to UTF-8 with error replacement if detection was wrong
+            print(f"[{self.worker_id}] ⚠️  Decoding failed with {encoding}, falling back to UTF-8")
+            text = raw_bytes.decode('utf-8', errors='replace')
+
+        text = text.strip()
+        print(f"[{self.worker_id}] ✓ Read {len(text)} characters from text file")
+        return text, False  # No OCR used
+
+    def process_image_file(self, image_path: str) -> tuple[str, bool]:
+        """Process an image file using OCR to extract text"""
         try:
             from PIL import Image
             import pytesseract
@@ -134,52 +134,34 @@ class PDFWorker:
             import numpy as np
 
             print(f"[{self.worker_id}] 🖼️  Loading image...")
-
-            # Load image using OpenCV for preprocessing
             image = cv2.imread(image_path)
 
-            # Preprocess image for better OCR
             print(f"[{self.worker_id}] 🖼️  Preprocessing image for OCR...")
-
-            # Convert to grayscale
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-            # Apply Gaussian blur to reduce noise
             blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-            # Use adaptive thresholding for better text detection
             thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
 
-            # Perform OCR using pytesseract
             print(f"[{self.worker_id}] 🔍 Performing OCR on image...")
             text = pytesseract.image_to_string(thresh, lang='+'.join(OCR_LANGUAGES))
-
-            # Clean up text
             text = text.strip()
 
-            # If pytesseract didn't work well, try with original image
             if len(text) < 10:
                 text = pytesseract.image_to_string(image, lang='+'.join(OCR_LANGUAGES))
                 text = text.strip()
 
-            return text, True  # Always return True for OCR used with images
+            return text, True
         except Exception as e:
             raise Exception(f"Failed to process image: {e}")
 
     def process_document(self, job_data: Dict[str, Any]):
-        """
-        Process a single document (supports PDFs and images)
-
-        Args:
-            job_data: Job information from queue
-        """
+        """Process a single document (supports PDFs, images, and text files)"""
         document_id = job_data['document_id']
         storage_path = job_data['storage_path']
         needs_ocr = job_data.get('needs_ocr', False)
         user_id = job_data.get('user_id')
 
-        # Detect file type
-        mime_type, _ = mimetypes.guess_type(storage_path)
+        # Prefer mime_type from job_data, fall back to guessing from path
+        mime_type = job_data.get('mime_type') or mimetypes.guess_type(storage_path)[0]
 
         print(f"\n{'='*60}")
         print(f"[{self.worker_id}] 📄 Processing document: {document_id}")
@@ -206,6 +188,7 @@ class PDFWorker:
                 print(f"[{self.worker_id}] 🖼️  Processing as image...")
                 self.update_status(document_id, 'processing', 'Processing image file...')
                 text, used_ocr = self.process_image_file(local_path)
+
             elif mime_type == 'application/pdf':
                 print(f"[{self.worker_id}] 📄 Processing as PDF...")
                 if needs_ocr:
@@ -214,8 +197,13 @@ class PDFWorker:
                 else:
                     print(f"[{self.worker_id}] 📝 Extracting text from digital PDF...")
                     self.update_status(document_id, 'processing', 'Extracting text...')
-
                 text, used_ocr = process_pdf_file(local_path, force_ocr=needs_ocr)
+
+            elif mime_type == 'text/plain':
+                print(f"[{self.worker_id}] 📝 Processing as text file...")
+                self.update_status(document_id, 'processing', 'Reading text file...')
+                text, used_ocr = self.process_text_file(local_path)
+
             else:
                 raise ValueError(f"Unsupported file type: {mime_type}")
 
@@ -236,7 +224,6 @@ class PDFWorker:
                 batch_chunks = chunks[batch_idx:batch_idx + BATCH_SIZE]
                 batch_texts = [chunk['text'] for chunk in batch_chunks]
 
-                # Update progress
                 progress = int((batch_idx / len(chunks)) * 100)
                 self.update_status(
                     document_id,
@@ -244,7 +231,6 @@ class PDFWorker:
                     f'Generating embeddings: {progress}%...'
                 )
 
-                # Generate embeddings for batch
                 batch_embeddings = generate_embeddings_batch(batch_texts, batch_size=BATCH_SIZE)
                 all_embeddings.extend(batch_embeddings)
 
@@ -256,7 +242,6 @@ class PDFWorker:
             print(f"[{self.worker_id}] 💾 Storing embeddings in database...")
             self.update_status(document_id, 'processing', 'Storing embeddings...')
 
-            # Prepare records for insertion
             records = []
             for i, (chunk, embedding) in enumerate(zip(chunks, all_embeddings)):
                 records.append({
@@ -270,7 +255,6 @@ class PDFWorker:
                     'metadata': {}
                 })
 
-            # Insert in batches of 100 using upsert to handle re-processing scenarios
             insert_batch_size = 100
             for i in range(0, len(records), insert_batch_size):
                 batch = records[i:i + insert_batch_size]
@@ -279,7 +263,7 @@ class PDFWorker:
 
             print(f"[{self.worker_id}] ✓ Stored {len(records)} chunks in database")
 
-            # Step 7: Update metadata to track embedding model used
+            # Step 7: Update metadata
             print(f"[{self.worker_id}] 📝 Updating document metadata...")
             self.supabase.table('documents').update({
                 'metadata': {
@@ -302,7 +286,6 @@ class PDFWorker:
             print(f"[{self.worker_id}]    Used OCR: {used_ocr}")
             print(f"[{self.worker_id}]    Embedding model: {os.getenv('EMBEDDING_MODEL', 'BAAI/bge-small-en-v1.5')}\n")
 
-            # Update metrics
             self.jobs_processed += 1
 
         except Exception as e:
@@ -318,7 +301,6 @@ class PDFWorker:
             )
 
         finally:
-            # Clean up temporary file
             if local_path and os.path.exists(local_path):
                 try:
                     os.remove(local_path)
@@ -332,7 +314,6 @@ class PDFWorker:
 
         while True:
             try:
-                # Claim one pending job
                 result = (
                     self.supabase.table('processing_queue')
                     .select('*')
@@ -355,10 +336,8 @@ class PDFWorker:
                     'status': 'processing'
                 }).eq('id', job_id).eq('status', 'queued').execute()
 
-                # Process the document
                 self.process_document(job_data)
 
-                # Mark job as done
                 self.supabase.table('processing_queue').update({
                     'status': 'completed'
                 }).eq('id', job_id).execute()
@@ -387,7 +366,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
             worker = getattr(self.server, 'worker', None)
 
-            # Get queue length from Postgres
             queue_length = 0
             if worker:
                 try:
