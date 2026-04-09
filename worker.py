@@ -9,13 +9,12 @@ import requests
 from typing import Dict, Any
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
-import psycopg2
-import psycopg2.extras
+from supabase import create_client, Client
 import mimetypes
 import chardet
 
 from config import (
-    DATABASE_URL,
+    SUPABASE_URL, SUPABASE_KEY,
     TEMP_DIR, BATCH_SIZE,
     PORT, OCR_LANGUAGES, EMBEDDING_DIMENSIONS
 )
@@ -32,10 +31,9 @@ class PDFWorker:
         self.worker_id = os.getenv('WORKER_ID', f'worker-{int(time.time()) % 10000:04d}')
         print(f"🚀 Initializing PDF Worker [{self.worker_id}]...")
 
-        # Connect directly to Postgres — no Supabase service key needed
-        self.conn = psycopg2.connect(DATABASE_URL)
-        self.conn.autocommit = True
-        print(f"[{self.worker_id}] ✓ Connected to database")
+        # Publishable key (sb_publishable_...) — no service key on Render
+        self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print(f"[{self.worker_id}] ✓ Connected to Supabase")
 
         self.poll_interval = int(os.getenv('POLL_INTERVAL', '5'))  # seconds
         print(f"[{self.worker_id}] ✓ Polling processing_queue every {self.poll_interval}s")
@@ -46,51 +44,36 @@ class PDFWorker:
         self.jobs_processed = 0
         self.start_time = time.time()
 
-    def _cursor(self):
-        """Return a RealDictCursor, reconnecting if the connection was lost"""
-        try:
-            self.conn.cursor().execute('SELECT 1')
-        except psycopg2.OperationalError:
-            print(f"[{self.worker_id}] ⚠️  DB connection lost, reconnecting...")
-            self.conn = psycopg2.connect(DATABASE_URL)
-            self.conn.autocommit = True
-        return self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
     def update_status(self, document_id: str, status: str, message: str = None,
                      chunk_count: int = None, error: str = None):
         """Update document status in database"""
         try:
-            fields = ["status = %s", "updated_at = now()"]
-            values = [status]
+            update_data = {
+                'status': status,
+                'updated_at': 'now()'
+            }
 
             if message:
-                fields.append("status_message = %s")
-                values.append(message)
+                update_data['status_message'] = message
 
             if chunk_count is not None:
-                fields.append("chunk_count = %s")
-                values.append(chunk_count)
+                update_data['chunk_count'] = chunk_count
 
             if error:
-                fields.append("error_message = %s")
-                values.append(error)
+                update_data['error_message'] = error
 
             if status == 'processing':
-                fields.append("processing_started_at = now()")
+                update_data['processing_started_at'] = 'now()'
             elif status in ['completed', 'failed', 'partial']:
-                fields.append("processing_completed_at = now()")
+                update_data['processing_completed_at'] = 'now()'
 
-            values.append(document_id)
-            sql = f"UPDATE documents SET {', '.join(fields)} WHERE id = %s"
-
-            with self._cursor() as cur:
-                cur.execute(sql, values)
+            self.supabase.table('documents').update(update_data).eq('id', document_id).execute()
 
         except Exception as e:
             print(f"⚠️  Failed to update status: {e}")
 
     def download_file(self, download_url: str, document_id: str, mime_type: str) -> str:
-        """Download file from a signed URL — no Supabase SDK needed"""
+        """Download file from signed URL — no Supabase storage credentials needed"""
         if mime_type and mime_type.startswith('image/'):
             ext = mime_type.split('/')[-1]
             if ext == 'jpeg':
@@ -168,56 +151,11 @@ class PDFWorker:
         except Exception as e:
             raise Exception(f"Failed to process image: {e}")
 
-    def store_chunks(self, document_id: str, user_id: str, mime_type: str,
-                     chunks: list, embeddings: list):
-        """Upsert all chunk + embedding records into knowledge_base"""
-        insert_batch_size = 100
-        total = len(chunks)
-
-        for i in range(0, total, insert_batch_size):
-            batch_chunks = chunks[i:i + insert_batch_size]
-            batch_embeddings = embeddings[i:i + insert_batch_size]
-
-            records = [
-                (
-                    document_id,
-                    chunk['text'],
-                    embedding,
-                    chunk['index'],
-                    chunk['token_count'],
-                    mime_type,
-                    user_id,
-                    json.dumps({})
-                )
-                for chunk, embedding in zip(batch_chunks, batch_embeddings)
-            ]
-
-            with self._cursor() as cur:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """
-                    INSERT INTO knowledge_base
-                        (document_id, content, embedding, chunk_index,
-                         token_count, file_type, user_id, metadata)
-                    VALUES %s
-                    ON CONFLICT (document_id, chunk_index)
-                    DO UPDATE SET
-                        content     = EXCLUDED.content,
-                        embedding   = EXCLUDED.embedding,
-                        token_count = EXCLUDED.token_count,
-                        file_type   = EXCLUDED.file_type,
-                        metadata    = EXCLUDED.metadata
-                    """,
-                    records
-                )
-
-            print(f"[{self.worker_id}]   Upserted {min(i + insert_batch_size, total)}/{total} chunks")
-
     def process_document(self, job_data: Dict[str, Any]):
         """Process a single document (supports PDFs, images, and text files)"""
         document_id = job_data['document_id']
         storage_path = job_data['storage_path']
-        download_url = job_data['download_url']  # signed URL generated by edge function
+        download_url = job_data['download_url']  # signed URL from edge function
         needs_ocr = job_data.get('needs_ocr', False)
         user_id = job_data.get('user_id')
 
@@ -299,27 +237,44 @@ class PDFWorker:
 
             print(f"[{self.worker_id}] ✓ Generated {len(all_embeddings)} embeddings")
 
-            # Step 6: Store chunks + embeddings
+            # Step 6: Store chunks + embeddings in database
             print(f"[{self.worker_id}] 💾 Storing embeddings in database...")
             self.update_status(document_id, 'processing', 'Storing embeddings...')
-            self.store_chunks(document_id, user_id, mime_type, chunks, all_embeddings)
-            print(f"[{self.worker_id}] ✓ Stored {len(chunks)} chunks in database")
+
+            records = []
+            for chunk, embedding in zip(chunks, all_embeddings):
+                records.append({
+                    'document_id': document_id,
+                    'content': chunk['text'],
+                    'embedding': embedding,
+                    'chunk_index': chunk['index'],
+                    'token_count': chunk['token_count'],
+                    'file_type': mime_type,
+                    'user_id': user_id,
+                    'metadata': {}
+                })
+
+            insert_batch_size = 100
+            for i in range(0, len(records), insert_batch_size):
+                batch = records[i:i + insert_batch_size]
+                self.supabase.table('knowledge_base').upsert(
+                    batch,
+                    on_conflict='document_id,chunk_index'
+                ).execute()
+                print(f"[{self.worker_id}]   Upserted {min(i + insert_batch_size, len(records))}/{len(records)} chunks")
+
+            print(f"[{self.worker_id}] ✓ Stored {len(records)} chunks in database")
 
             # Step 7: Update document metadata
             print(f"[{self.worker_id}] 📝 Updating document metadata...")
             embedding_model = os.getenv('EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
-            with self._cursor() as cur:
-                cur.execute(
-                    "UPDATE documents SET metadata = %s WHERE id = %s",
-                    (
-                        json.dumps({
-                            'embedding_model': embedding_model,
-                            'embedding_dimensions': EMBEDDING_DIMENSIONS,
-                            'processed_at': time.time()
-                        }),
-                        document_id
-                    )
-                )
+            self.supabase.table('documents').update({
+                'metadata': {
+                    'embedding_model': embedding_model,
+                    'embedding_dimensions': EMBEDDING_DIMENSIONS,
+                    'processed_at': time.time()
+                }
+            }).eq('id', document_id).execute()
 
             # Step 8: Mark as completed
             self.update_status(
@@ -360,66 +315,50 @@ class PDFWorker:
                     print(f"[{self.worker_id}] ⚠️  Failed to clean up temp file: {e}")
 
     def run(self):
-        """Main worker loop - polls processing_queue via direct Postgres"""
+        """Main worker loop - polls processing_queue table"""
         print(f"[{self.worker_id}] 🔄 Worker loop started\n")
 
         while True:
             try:
-                # FOR UPDATE SKIP LOCKED is atomic — safe with multiple workers
-                with self._cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT id, job_data
-                        FROM processing_queue
-                        WHERE status = 'queued'
-                        ORDER BY created_at
-                        LIMIT 1
-                        FOR UPDATE SKIP LOCKED
-                        """
-                    )
-                    job_row = cur.fetchone()
+                result = (
+                    self.supabase.table('processing_queue')
+                    .select('*')
+                    .eq('status', 'queued')
+                    .order('created_at')
+                    .limit(1)
+                    .execute()
+                )
 
-                if not job_row:
+                if not result.data:
                     time.sleep(self.poll_interval)
                     continue
 
+                job_row = result.data[0]
                 job_id = job_row['id']
                 job_data = job_row['job_data']
 
-                # Claim the job
-                with self._cursor() as cur:
-                    cur.execute(
-                        """
-                        UPDATE processing_queue
-                        SET status = 'processing', updated_at = now()
-                        WHERE id = %s AND status = 'queued'
-                        """,
-                        (job_id,)
-                    )
+                # Claim the job — double eq guards against two workers
+                # picking up the same row simultaneously
+                self.supabase.table('processing_queue').update({
+                    'status': 'processing',
+                    'updated_at': 'now()'
+                }).eq('id', job_id).eq('status', 'queued').execute()
 
                 # Process and finalize queue row
                 try:
                     self.process_document(job_data)
-                    with self._cursor() as cur:
-                        cur.execute(
-                            """
-                            UPDATE processing_queue
-                            SET status = 'completed', processed_at = now(), updated_at = now()
-                            WHERE id = %s
-                            """,
-                            (job_id,)
-                        )
+                    self.supabase.table('processing_queue').update({
+                        'status': 'completed',
+                        'processed_at': 'now()',
+                        'updated_at': 'now()'
+                    }).eq('id', job_id).execute()
                 except Exception:
                     print(f"[{self.worker_id}] ❌ Marking queue job {job_id} as failed")
-                    with self._cursor() as cur:
-                        cur.execute(
-                            """
-                            UPDATE processing_queue
-                            SET status = 'failed', processed_at = now(), updated_at = now()
-                            WHERE id = %s
-                            """,
-                            (job_id,)
-                        )
+                    self.supabase.table('processing_queue').update({
+                        'status': 'failed',
+                        'processed_at': 'now()',
+                        'updated_at': 'now()'
+                    }).eq('id', job_id).execute()
 
             except KeyboardInterrupt:
                 print(f"\n\n[{self.worker_id}] 🛑 Worker stopped by user")
@@ -449,12 +388,13 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             queue_length = 0
             if worker:
                 try:
-                    with worker._cursor() as cur:
-                        cur.execute(
-                            "SELECT COUNT(*) AS cnt FROM processing_queue WHERE status = 'queued'"
-                        )
-                        row = cur.fetchone()
-                        queue_length = row['cnt'] if row else 0
+                    res = (
+                        worker.supabase.table('processing_queue')
+                        .select('id', count='exact')
+                        .eq('status', 'queued')
+                        .execute()
+                    )
+                    queue_length = res.count or 0
                 except Exception:
                     pass
 
