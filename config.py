@@ -31,14 +31,14 @@ def get_env_int(key: str, default: int) -> int:
 
 # ============================================================================
 # SUPABASE CONFIGURATION
-# Uses the publishable key (sb_publishable_...) — safe for backend workers.
-# Never use the secret key (sb_secret_...) here.
+# Uses the legacy service_role key — kept server-side on Render only,
+# never exposed to the client.
 # ============================================================================
 SUPABASE_URL = os.getenv('SUPABASE_URL')
-SUPABASE_KEY = os.getenv('SUPABASE_KEY')  # sb_publishable_...
+SUPABASE_SERVICE_KEY = os.getenv('SUPABASE_SERVICE_KEY')
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
+if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set")
 
 # ============================================================================
 # PORT CONFIGURATION (for health checks)
@@ -85,7 +85,7 @@ LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 if __name__ == "__main__":
     print("Configuration loaded:")
     print(f"  SUPABASE_URL: {SUPABASE_URL}")
-    print(f"  SUPABASE_KEY: {'set' if SUPABASE_KEY else 'NOT SET'}")
+    print(f"  SUPABASE_SERVICE_KEY: {'set' if SUPABASE_SERVICE_KEY else 'NOT SET'}")
     print(f"  PORT: {PORT}")
     print(f"  BATCH_SIZE: {BATCH_SIZE}")
     print(f"  CHUNK_SIZE: {CHUNK_SIZE}")
