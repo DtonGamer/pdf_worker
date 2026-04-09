@@ -30,13 +30,14 @@ def get_env_int(key: str, default: int) -> int:
 
 
 # ============================================================================
-# SUPABASE CONFIGURATION
+# DATABASE CONFIGURATION
+# Connects directly via Postgres — no Supabase service role key needed.
+# Format: postgres://pdf_worker:password@db.xxxx.supabase.co:5432/postgres
 # ============================================================================
-SUPABASE_URL = os.getenv('SUPABASE_URL')
-SUPABASE_SERVICE_KEY = os.getenv('SUPABASE_SERVICE_KEY')
+DATABASE_URL = os.getenv('DATABASE_URL')
 
-if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-    raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set")
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL must be set")
 
 # ============================================================================
 # PORT CONFIGURATION (for health checks)
@@ -90,3 +91,4 @@ if __name__ == "__main__":
     print(f"  EMBEDDING_DIMENSIONS: {EMBEDDING_DIMENSIONS}")
     print(f"  OCR_LANGUAGES: {OCR_LANGUAGES}")
     print(f"  OCR_DPI: {OCR_DPI}")
+    print(f"  DATABASE_URL: {'set' if DATABASE_URL else 'NOT SET'}")
