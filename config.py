@@ -30,14 +30,15 @@ def get_env_int(key: str, default: int) -> int:
 
 
 # ============================================================================
-# DATABASE CONFIGURATION
-# Connects directly via Postgres — no Supabase service role key needed.
-# Format: postgres://pdf_worker:password@db.xxxx.supabase.co:5432/postgres
+# SUPABASE CONFIGURATION
+# Uses the publishable key (sb_publishable_...) — safe for backend workers.
+# Never use the secret key (sb_secret_...) here.
 # ============================================================================
-DATABASE_URL = os.getenv('DATABASE_URL')
+SUPABASE_URL = os.getenv('SUPABASE_URL')
+SUPABASE_KEY = os.getenv('SUPABASE_KEY')  # sb_publishable_...
 
-if not DATABASE_URL:
-    raise ValueError("DATABASE_URL must be set")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
 
 # ============================================================================
 # PORT CONFIGURATION (for health checks)
@@ -83,6 +84,8 @@ LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 # ============================================================================
 if __name__ == "__main__":
     print("Configuration loaded:")
+    print(f"  SUPABASE_URL: {SUPABASE_URL}")
+    print(f"  SUPABASE_KEY: {'set' if SUPABASE_KEY else 'NOT SET'}")
     print(f"  PORT: {PORT}")
     print(f"  BATCH_SIZE: {BATCH_SIZE}")
     print(f"  CHUNK_SIZE: {CHUNK_SIZE}")
@@ -91,4 +94,3 @@ if __name__ == "__main__":
     print(f"  EMBEDDING_DIMENSIONS: {EMBEDDING_DIMENSIONS}")
     print(f"  OCR_LANGUAGES: {OCR_LANGUAGES}")
     print(f"  OCR_DPI: {OCR_DPI}")
-    print(f"  DATABASE_URL: {'set' if DATABASE_URL else 'NOT SET'}")
