@@ -14,7 +14,7 @@ import mimetypes
 import chardet
 
 from config import (
-    SUPABASE_URL, SUPABASE_KEY,
+    SUPABASE_URL, SUPABASE_SERVICE_KEY,
     TEMP_DIR, BATCH_SIZE,
     PORT, OCR_LANGUAGES, EMBEDDING_DIMENSIONS
 )
@@ -31,8 +31,8 @@ class PDFWorker:
         self.worker_id = os.getenv('WORKER_ID', f'worker-{int(time.time()) % 10000:04d}')
         print(f"🚀 Initializing PDF Worker [{self.worker_id}]...")
 
-        # Publishable key (sb_publishable_...) — no service key on Render
-        self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        # Legacy service role key — server-side only, never exposed to clients
+        self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         print(f"[{self.worker_id}] ✓ Connected to Supabase")
 
         self.poll_interval = int(os.getenv('POLL_INTERVAL', '5'))  # seconds
@@ -73,7 +73,7 @@ class PDFWorker:
             print(f"⚠️  Failed to update status: {e}")
 
     def download_file(self, download_url: str, document_id: str, mime_type: str) -> str:
-        """Download file from signed URL — no Supabase storage credentials needed"""
+        """Download file from signed URL — no storage credentials needed"""
         if mime_type and mime_type.startswith('image/'):
             ext = mime_type.split('/')[-1]
             if ext == 'jpeg':
