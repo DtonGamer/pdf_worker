@@ -5,7 +5,6 @@ import os
 import json
 import time
 import traceback
-import requests
 from typing import Dict, Any
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
@@ -72,8 +71,8 @@ class PDFWorker:
         except Exception as e:
             print(f"⚠️  Failed to update status: {e}")
 
-    def download_file(self, download_url: str, document_id: str, mime_type: str) -> str:
-        """Download file from signed URL — no storage credentials needed"""
+    def download_file(self, storage_path: str, document_id: str, mime_type: str) -> str:
+        """Download file directly from Supabase storage using service key"""
         if mime_type and mime_type.startswith('image/'):
             ext = mime_type.split('/')[-1]
             if ext == 'jpeg':
@@ -88,10 +87,9 @@ class PDFWorker:
         local_path = os.path.join(TEMP_DIR, f"{document_id}.{ext}")
 
         try:
-            response = requests.get(download_url, timeout=60)
-            response.raise_for_status()
+            response = self.supabase.storage.from_('documents').download(storage_path)
             with open(local_path, 'wb') as f:
-                f.write(response.content)
+                f.write(response)
             return local_path
 
         except Exception as e:
@@ -155,7 +153,6 @@ class PDFWorker:
         """Process a single document (supports PDFs, images, and text files)"""
         document_id = job_data['document_id']
         storage_path = job_data['storage_path']
-        download_url = job_data['download_url']  # signed URL from edge function
         needs_ocr = job_data.get('needs_ocr', False)
         user_id = job_data.get('user_id')
 
@@ -176,10 +173,10 @@ class PDFWorker:
             # Step 1: Update status to processing
             self.update_status(document_id, 'processing', 'Starting processing...')
 
-            # Step 2: Download file via signed URL
+            # Step 2: Download file directly via Supabase storage
             print(f"[{self.worker_id}] ⬇️  Downloading file...")
             self.update_status(document_id, 'processing', 'Downloading document...')
-            local_path = self.download_file(download_url, document_id, mime_type)
+            local_path = self.download_file(storage_path, document_id, mime_type)
             print(f"[{self.worker_id}] ✓ Downloaded to: {local_path}")
 
             # Step 3: Process based on file type
