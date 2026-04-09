@@ -1,212 +1,126 @@
 """
-Embedding generation using HuggingFace sentence-transformers
-ULTRA MEMORY OPTIMIZED for 512MB RAM environments (Render free tier)
+Embedding generation using HuggingFace Inference API
+No local model loaded — keeps memory well under 512MB on Render free tier
 """
-from sentence_transformers import SentenceTransformer
-import numpy as np
-from typing import List, Union
-from config import EMBEDDING_MODEL, EMBEDDING_DIMENSIONS, BATCH_SIZE
-import gc
-import torch
-import sys
+import os
+import time
+import requests
+from typing import List
+from config import EMBEDDING_MODEL, EMBEDDING_DIMENSIONS
 
 
-class EmbeddingGenerator:
-    """Generate embeddings using sentence-transformers with aggressive memory optimization"""
+HUGGINGFACE_API_KEY = os.getenv('HUGGINGFACE_API_KEY')
+API_URL = f"https://router.huggingface.co/hf-inference/models/{EMBEDDING_MODEL}"
 
-    def __init__(self, model_name: str = EMBEDDING_MODEL):
-        """
-        Initialize embedding model with extreme memory constraints
-        
-        Args:
-            model_name: HuggingFace model identifier
-        """
-        print(f"Loading embedding model: {model_name}")
-        print(f"Memory before model load: {self._get_memory_usage():.1f}MB")
 
-        # Force garbage collection before loading
-        gc.collect()
+def _call_api(texts: List[str], retries: int = 3) -> List[List[float]]:
+    """
+    Call HuggingFace Inference API to generate embeddings.
+    Retries on model loading (503) with exponential backoff.
+    """
+    if not HUGGINGFACE_API_KEY:
+        raise ValueError("HUGGINGFACE_API_KEY environment variable is not set")
 
-        # Use CPU only and optimize for low memory
-        # device='cpu' is critical - GPU memory would exceed limits
-        self.model = SentenceTransformer(model_name, device='cpu')
+    headers = {
+        'Authorization': f'Bearer {HUGGINGFACE_API_KEY}',
+        'Content-Type': 'application/json'
+    }
 
-        # Set to evaluation mode to save memory (no gradient tracking)
-        self.model.eval()
+    payload = {
+        'inputs': texts,
+        'options': {'wait_for_model': True}
+    }
 
-        # Disable gradient computation globally
-        torch.set_grad_enabled(False)
-
-        print(f"Model loaded. Embedding dimension: {self.model.get_sentence_embedding_dimension()}")
-        print(f"Memory after model load: {self._get_memory_usage():.1f}MB")
-
-        # Verify dimensions match config
-        actual_dim = self.model.get_sentence_embedding_dimension()
-        if actual_dim != EMBEDDING_DIMENSIONS:
-            raise ValueError(
-                f"Model dimension mismatch: expected {EMBEDDING_DIMENSIONS}, got {actual_dim}"
-            )
-
-        # Force cleanup after initialization
-        gc.collect()
-
-    def _get_memory_usage(self) -> float:
-        """Get current memory usage in MB"""
+    for attempt in range(retries):
         try:
-            import psutil
-            process = psutil.Process()
-            return process.memory_info().rss / 1024 / 1024
-        except ImportError:
-            return 0.0
+            response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
 
-    def generate_embeddings(
-        self, 
-        texts: Union[str, List[str]], 
-        batch_size: int = 2,  # ULTRA SMALL: 2 for 512MB constraint
-        show_progress: bool = False  # Disable progress bar to save memory
-    ) -> np.ndarray:
-        """
-        Generate embeddings for text(s) with aggressive memory management
-        
-        Args:
-            texts: Single text or list of texts
-            batch_size: Number of texts to process at once (default 2 for 512MB)
-            show_progress: Show progress bar (disabled by default for memory)
-            
-        Returns:
-            Numpy array of embeddings (n_texts, embedding_dim)
-        """
-        # Convert single text to list
-        if isinstance(texts, str):
-            texts = [texts]
+            if response.status_code == 503:
+                # Model is loading on HuggingFace side — wait and retry
+                wait = 2 ** attempt
+                print(f"⏳ Model loading on HuggingFace, retrying in {wait}s...")
+                time.sleep(wait)
+                continue
 
-        # Force cleanup before processing
-        gc.collect()
-        torch.cuda.empty_cache()  # Safe even on CPU
+            response.raise_for_status()
+            result = response.json()
 
-        print(f"Generating embeddings for {len(texts)} texts in batches of {batch_size}")
-        mem_before = self._get_memory_usage()
-        if mem_before > 0:
-            print(f"Memory before encoding: {mem_before:.1f}MB")
+            # API returns either [[...], [...]] or {"embeddings": [[...], [...]]}
+            if isinstance(result, list):
+                embeddings = result
+            elif isinstance(result, dict) and 'embeddings' in result:
+                embeddings = result['embeddings']
+            else:
+                raise ValueError(f"Unexpected API response format: {type(result)}")
 
-        # Generate embeddings with memory optimization
-        with torch.no_grad():  # Critical: Don't track gradients
-            embeddings = self.model.encode(
-                texts,
-                batch_size=batch_size,
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-                show_progress_bar=show_progress,
-                convert_to_tensor=False  # Return numpy to avoid tensor memory
-            )
+            # Validate dimensions
+            for emb in embeddings:
+                if len(emb) != EMBEDDING_DIMENSIONS:
+                    raise ValueError(
+                        f"Dimension mismatch: expected {EMBEDDING_DIMENSIONS}, got {len(emb)}"
+                    )
 
-        mem_after = self._get_memory_usage()
-        if mem_after > 0:
-            print(f"Memory after encoding: {mem_after:.1f}MB")
+            return embeddings
 
-        # Aggressive garbage collection
-        gc.collect()
-        torch.cuda.empty_cache()  # Safe even on CPU
+        except requests.exceptions.Timeout:
+            if attempt < retries - 1:
+                print(f"⚠️  API timeout, retrying ({attempt + 1}/{retries})...")
+                time.sleep(2 ** attempt)
+            else:
+                raise Exception("HuggingFace API timed out after all retries")
 
-        return embeddings
+        except requests.exceptions.RequestException as e:
+            if attempt < retries - 1:
+                print(f"⚠️  API error: {e}, retrying ({attempt + 1}/{retries})...")
+                time.sleep(2 ** attempt)
+            else:
+                raise Exception(f"HuggingFace API failed: {e}")
 
-    def generate_single_embedding(self, text: str) -> List[float]:
-        """
-        Generate embedding for a single text
-        
-        Args:
-            text: Input text
-            
-        Returns:
-            List of floats (embedding vector)
-        """
-        embedding = self.generate_embeddings(text, show_progress=False, batch_size=1)
-        return embedding[0].tolist()
-
-    def generate_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """
-        Generate embeddings for a batch of texts with memory-aware batching
-        
-        Args:
-            texts: List of input texts
-            
-        Returns:
-            List of embedding vectors
-        """
-        # Ultra-small batch size for 512MB RAM
-        # Process 2 texts at a time to prevent OOM
-        embeddings = self.generate_embeddings(texts, show_progress=False, batch_size=2)
-
-        # Explicit memory cleanup after processing
-        result = embeddings.tolist()
-        del embeddings  # Remove reference to numpy array
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        return result
-
-
-# Global model instance (loaded once to save memory)
-_model_instance = None
-
-
-def get_embedding_model() -> EmbeddingGenerator:
-    """
-    Get or create global embedding model instance (singleton pattern)
-    This ensures we only load the model once, saving memory
-    
-    Returns:
-        EmbeddingGenerator instance
-    """
-    global _model_instance
-    if _model_instance is None:
-        _model_instance = EmbeddingGenerator()
-    return _model_instance
+    raise Exception("HuggingFace API failed after all retries")
 
 
 def generate_embedding(text: str) -> List[float]:
     """
-    Convenience function to generate single embedding
-    
+    Generate embedding for a single text.
+
     Args:
         text: Input text
-        
+
     Returns:
-        Embedding vector as list
+        Embedding vector as list of floats
     """
-    model = get_embedding_model()
-    return model.generate_single_embedding(text)
+    results = _call_api([text])
+    return results[0]
 
 
-def generate_embeddings_batch(texts: List[str], batch_size: int = 2) -> List[List[float]]:
+def generate_embeddings_batch(texts: List[str], batch_size: int = 32) -> List[List[float]]:
     """
-    Convenience function to generate batch embeddings
-    Ultra memory optimized for 512MB RAM
-    
+    Generate embeddings for a list of texts, batching API calls.
+
     Args:
         texts: List of input texts
-        batch_size: Batch size for processing (default 2 for 512MB constraint)
-        
+        batch_size: Texts per API call (default 32 — safe for HuggingFace free tier)
+
     Returns:
         List of embedding vectors
     """
-    model = get_embedding_model()
-    # Override batch_size to ensure it doesn't exceed safe limits
-    safe_batch_size = min(batch_size, 2)
-    return model.generate_batch_embeddings(texts)
+    all_embeddings = []
+    total = len(texts)
+
+    for i in range(0, total, batch_size):
+        batch = texts[i:i + batch_size]
+        print(f"  Embedding batch {i // batch_size + 1}/{(total + batch_size - 1) // batch_size} "
+              f"({len(batch)} texts)...")
+        embeddings = _call_api(batch)
+        all_embeddings.extend(embeddings)
+
+    return all_embeddings
 
 
 if __name__ == "__main__":
-    # Test embedding generation
-    print("Testing embedding generation...")
-    print(f"Python version: {sys.version}")
-
-    # Check if psutil is available
-    try:
-        import psutil
-        print(f"Initial memory: {psutil.Process().memory_info().rss / 1024 / 1024:.1f}MB")
-    except ImportError:
-        print("psutil not available, memory monitoring disabled")
+    print("Testing HuggingFace API embedding generation...")
+    print(f"Model: {EMBEDDING_MODEL}")
+    print(f"API URL: {API_URL}")
 
     test_texts = [
         "This is a test sentence.",
@@ -214,25 +128,22 @@ if __name__ == "__main__":
         "Machine learning is fascinating."
     ]
 
-    # Test single embedding
     print("\nTesting single embedding...")
-    single_emb = generate_embedding(test_texts[0])
-    print(f"Single embedding shape: {len(single_emb)}")
-    print(f"First 5 values: {single_emb[:5]}")
+    single = generate_embedding(test_texts[0])
+    print(f"Dimension: {len(single)}")
+    print(f"First 5 values: {single[:5]}")
 
-    # Test batch embeddings
     print("\nTesting batch embeddings...")
-    batch_embs = generate_embeddings_batch(test_texts)
-    print(f"Batch embeddings shape: {len(batch_embs)} x {len(batch_embs[0])}")
+    batch = generate_embeddings_batch(test_texts)
+    print(f"Batch shape: {len(batch)} x {len(batch[0])}")
 
-    # Test similarity
-    from numpy import dot
+    from numpy import dot, array
     from numpy.linalg import norm
 
     def cosine_similarity(a, b):
+        a, b = array(a), array(b)
         return dot(a, b) / (norm(a) * norm(b))
 
-    sim = cosine_similarity(batch_embs[0], batch_embs[1])
+    sim = cosine_similarity(batch[0], batch[1])
     print(f"\nSimilarity between first two texts: {sim:.4f}")
-
     print("\n✅ All tests passed!")
