@@ -10,7 +10,7 @@ from config import EMBEDDING_MODEL, EMBEDDING_DIMENSIONS
 
 
 HUGGINGFACE_API_KEY = os.getenv('HUGGINGFACE_API_KEY')
-API_URL = f"https://router.huggingface.co/hf-inference/models/{EMBEDDING_MODEL}"
+API_URL = f"https://router.huggingface.co/hf-inference/models/{EMBEDDING_MODEL}/pipeline/feature-extraction"
 
 
 def _call_api(texts: List[str], retries: int = 3) -> List[List[float]]:
