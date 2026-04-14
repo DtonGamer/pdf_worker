@@ -20,6 +20,7 @@ from config import (
 from ocr_processor import process_pdf_file
 from chunker import chunk_document
 from embeddings import generate_embeddings_batch
+from bible_seeder import process_bible
 
 
 class PDFWorker:
@@ -342,13 +343,23 @@ class PDFWorker:
                 }).eq('id', job_id).eq('status', 'queued').execute()
 
                 # Process and finalize queue row
+                # ── ROUTING: bible seed vs regular document ────────────────
                 try:
-                    self.process_document(job_data)
+                    job_type = job_data.get('job_type', 'document')
+
+                    if job_type == 'bible_seed':
+                        print(f"[{self.worker_id}] 📖 Routing to Bible seeder")
+                        process_bible(self.supabase, job_data, self.worker_id)
+                    else:
+                        print(f"[{self.worker_id}] 📄 Routing to document processor")
+                        self.process_document(job_data)
+
                     self.supabase.table('processing_queue').update({
                         'status': 'completed',
                         'processed_at': 'now()',
                         'updated_at': 'now()'
                     }).eq('id', job_id).execute()
+
                 except Exception:
                     print(f"[{self.worker_id}] ❌ Marking queue job {job_id} as failed")
                     self.supabase.table('processing_queue').update({
