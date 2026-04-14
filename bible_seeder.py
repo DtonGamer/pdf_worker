@@ -1,18 +1,19 @@
 """
 Bible seeder — processes a bible_seed job from the processing_queue.
-Downloads KJV JSON, chunks verses, generates embeddings, stores in knowledge_base.
+Supports both URL downloads and Supabase Storage file downloads.
+Downloads file, parses verses, generates embeddings, stores in knowledge_base.
 
 Called from worker.py when job_data['job_type'] == 'bible_seed'.
-Uses the same embeddings.py and chunker.py as the existing PDF pipeline.
+Uses the same embeddings.py as the existing PDF pipeline (unchanged).
 """
 import os
 import json
-import time
-import requests
-from typing import List, Dict, Any
+import re
+import tempfile
+from typing import List, Dict, Any, Optional
 
 from embeddings import generate_embeddings_batch
-from config import BATCH_SIZE, EMBEDDING_DIMENSIONS
+from config import BATCH_SIZE
 
 # How many consecutive verses to group into one chunk
 VERSES_PER_CHUNK = 8
@@ -35,30 +36,33 @@ def _update_bible_version(supabase, bible_version_id: str, status: str,
     supabase.table('bible_versions').update(payload).eq('id', bible_version_id).execute()
 
 
-def _download_bible_json(source_url: str) -> Dict:
+def _download_from_storage(supabase, storage_path: str) -> bytes:
     """
-    Download Bible JSON from source_url.
-    Expected format (aruljohn/Bible-kjv):
-    {
-      "Genesis": { "1": { "1": "In the beginning...", "2": "..." }, ... },
-      ...
-    }
+    Download file from Supabase Storage bibles bucket.
+    Returns raw file bytes.
     """
-    print(f"  ⬇️  Downloading Bible JSON from {source_url}...")
-    resp = requests.get(source_url, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    print(f"  ✓ Downloaded — {len(data)} books found")
-    return data
+    print(f"  ⬇️  Downloading from Storage: {storage_path}...")
+    
+    # Use service role client for storage access
+    response = supabase.storage.from_('bibles').download(storage_path)
+    
+    if isinstance(response, bytes):
+        return response
+    
+    # Handle response object if needed
+    if hasattr(response, 'content'):
+        return response.content
+    
+    raise Exception(f"Unexpected response type from storage: {type(response)}")
 
 
-def _build_verse_list(bible_data: Dict) -> List[Dict]:
+def _parse_verses_from_json(data: Dict) -> List[Dict]:
     """
-    Flatten the nested JSON into a list of verse dicts:
-    { book, chapter (int), verse (int), text }
+    Parse verses from nested JSON format (aruljohn/Bible-kjv style):
+    { "Genesis": { "1": { "1": "In the beginning...", "2": "..." }, ... }, ... }
     """
     verses = []
-    for book_name, chapters in bible_data.items():
+    for book_name, chapters in data.items():
         if not isinstance(chapters, dict):
             continue
         for chapter_str, verse_map in chapters.items():
@@ -80,9 +84,162 @@ def _build_verse_list(bible_data: Dict) -> List[Dict]:
                         'verse': verse_num,
                         'text': text.strip()
                     })
+    return verses
+
+
+def _parse_verses_from_text(text: str) -> List[Dict]:
+    """
+    Parse verses from plain text format.
+    Expected format: "Book Chapter:Verse Text" or similar patterns
+    """
+    verses = []
+    
+    # Pattern 1: "Genesis 1:1 In the beginning..."
+    # Pattern 2: "1:1 In the beginning..." (with book header)
+    # Pattern 3: "Genesis|1|1|In the beginning..." (pipe delimited)
+    
+    lines = text.split('\n')
+    current_book = None
+    
+    # Common book names for detection
+    book_names = [
+        'Genesis', 'Exodus', 'Leviticus', 'Numbers', 'Deuteronomy',
+        'Joshua', 'Judges', 'Ruth', '1 Samuel', '2 Samuel',
+        '1 Kings', '2 Kings', '1 Chronicles', '2 Chronicles',
+        'Ezra', 'Nehemiah', 'Esther', 'Job', 'Psalms', 'Proverbs',
+        'Ecclesiastes', 'Song of Solomon', 'Isaiah', 'Jeremiah',
+        'Lamentations', 'Ezekiel', 'Daniel', 'Hosea', 'Joel',
+        'Amos', 'Obadiah', 'Jonah', 'Micah', 'Nahum',
+        'Habakkuk', 'Zephaniah', 'Haggai', 'Zechariah', 'Malachi',
+        'Matthew', 'Mark', 'Luke', 'John', 'Acts',
+        'Romans', '1 Corinthians', '2 Corinthians', 'Galatians',
+        'Ephesians', 'Philippians', 'Colossians', '1 Thessalonians',
+        '2 Thessalonians', '1 Timothy', '2 Timothy', 'Titus',
+        'Philemon', 'Hebrews', 'James', '1 Peter', '2 Peter',
+        '1 John', '2 John', '3 John', 'Jude', 'Revelation'
+    ]
+    
+    # Try to detect format and parse
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Check if line starts with a book name (new book marker)
+        for book in book_names:
+            if line.startswith(book) and len(line) < len(book) + 5:
+                current_book = book
+                continue
+        
+        # Try "Book Chapter:Verse Text" format
+        match = re.match(r'^([1-3]?\s?[A-Za-z]+)\s+(\d+):(\d+)\s+(.+)$', line)
+        if match:
+            book, chapter, verse, text = match.groups()
+            verses.append({
+                'book': book.strip(),
+                'chapter': int(chapter),
+                'verse': int(verse),
+                'text': text.strip()
+            })
+            continue
+        
+        # Try "Chapter:Verse Text" format (requires current_book)
+        if current_book:
+            match = re.match(r'^(\d+):(\d+)\s+(.+)$', line)
+            if match:
+                chapter, verse, text = match.groups()
+                verses.append({
+                    'book': current_book,
+                    'chapter': int(chapter),
+                    'verse': int(verse),
+                    'text': text.strip()
+                })
+                continue
+        
+        # Try pipe-delimited format: Book|Chapter|Verse|Text
+        parts = line.split('|')
+        if len(parts) == 4:
+            book, chapter, verse, text = parts
+            try:
+                verses.append({
+                    'book': book.strip(),
+                    'chapter': int(chapter),
+                    'verse': int(verse),
+                    'text': text.strip()
+                })
+            except ValueError:
+                pass
+    
+    return verses
+
+
+def _parse_verses_from_pdf(file_bytes: bytes) -> List[Dict]:
+    """
+    Parse verses from PDF file bytes.
+    Extracts text and then parses verses.
+    """
+    try:
+        import PyPDF2
+    except ImportError:
+        raise Exception("PyPDF2 not installed. Run: pip install PyPDF2")
+    
+    text_parts = []
+    pdf_file = io.BytesIO(file_bytes)
+    reader = PyPDF2.PdfReader(pdf_file)
+    
+    for page in reader.pages:
+        text_parts.append(page.extract_text())
+    
+    full_text = '\n'.join(text_parts)
+    return _parse_verses_from_text(full_text)
+
+
+def _load_and_parse_file(supabase, file_type: str, source: str, is_storage_path: bool = False) -> List[Dict]:
+    """
+    Load file from URL or Storage and parse verses based on file type.
+    
+    Args:
+        file_type: 'json', 'txt', or 'pdf'
+        source: URL string or storage path
+        is_storage_path: True if source is storage path, False if URL
+    """
+    import requests
+    import io
+    
+    # Download the file
+    if is_storage_path:
+        file_bytes = _download_from_storage(supabase, source)
+    else:
+        # URL download
+        print(f"  ⬇️  Downloading from URL: {source}...")
+        resp = requests.get(source, timeout=60)
+        resp.raise_for_status()
+        file_bytes = resp.content
+        print(f"  ✓ Downloaded {len(file_bytes)} bytes")
+    
+    # Parse based on file type
+    if file_type == 'json':
+        # JSON format
+        text = file_bytes.decode('utf-8')
+        data = json.loads(text)
+        verses = _parse_verses_from_json(data)
+        
+    elif file_type == 'txt':
+        # Plain text format
+        text = file_bytes.decode('utf-8')
+        verses = _parse_verses_from_text(text)
+        
+    elif file_type == 'pdf':
+        # PDF format
+        verses = _parse_verses_from_pdf(file_bytes)
+        
+    else:
+        raise Exception(f"Unsupported file type: {file_type}")
+    
     # Sort canonically
     verses.sort(key=lambda v: (v['book'], v['chapter'], v['verse']))
-    print(f"  ✓ Flattened {len(verses)} verses")
+    print(f"  ✓ Parsed {len(verses)} verses from {file_type.upper()}")
+    
     return verses
 
 
@@ -134,31 +291,55 @@ def process_bible(supabase, job_data: Dict[str, Any], worker_id: str):
     """
     Main entry point called by worker.py for bible_seed jobs.
 
+    Supports both URL and Supabase Storage file sources.
+
     job_data shape:
     {
       "job_type": "bible_seed",
       "bible_version_id": "<uuid>",
       "abbreviation": "KJV",
-      "source_url": "https://...",
+      "source_url": "https://...",           # Optional: external URL
+      "source_storage_path": "bibles/...",    # Optional: storage path
+      "source_file_type": "json|txt|pdf",    # Required with storage_path
       "triggered_by": "<user_uuid>"
     }
     """
+    import io  # Import here for PDF parsing
+    
     bible_version_id = job_data['bible_version_id']
     abbreviation = job_data.get('abbreviation', 'UNKNOWN')
     source_url = job_data.get('source_url')
+    source_storage_path = job_data.get('source_storage_path')
+    source_file_type = job_data.get('source_file_type', 'json')
 
     print(f"\n{'='*60}")
     print(f"[{worker_id}] 📖 Seeding Bible: {abbreviation} ({bible_version_id})")
-    print(f"[{worker_id}]    Source: {source_url}")
+    
+    # Determine source
+    if source_storage_path:
+        print(f"[{worker_id}]    Source: Storage {source_storage_path} ({source_file_type})")
+        is_storage = True
+        source = source_storage_path
+    elif source_url:
+        print(f"[{worker_id}]    Source: URL {source_url}")
+        is_storage = False
+        source = source_url
+    else:
+        raise Exception("No source provided (need source_url or source_storage_path)")
+    
     print(f"{'='*60}\n")
 
     try:
-        # ── Step 1: Download ──────────────────────────────────────────────────
+        # ── Step 1: Download and Parse ─────────────────────────────────────────
         _update_bible_version(supabase, bible_version_id, 'processing')
-        bible_data = _download_bible_json(source_url)
-
-        # ── Step 2: Flatten to verse list ─────────────────────────────────────
-        verses = _build_verse_list(bible_data)
+        
+        verses = _load_and_parse_file(
+            supabase, 
+            source_file_type, 
+            source, 
+            is_storage_path=is_storage
+        )
+        
         total_verses = len(verses)
 
         # Update total_verses on the record
@@ -167,17 +348,17 @@ def process_bible(supabase, job_data: Dict[str, Any], worker_id: str):
             'updated_at': 'now()'
         }).eq('id', bible_version_id).execute()
 
-        # ── Step 3: Group into chunks ─────────────────────────────────────────
+        # ── Step 2: Group into chunks ─────────────────────────────────────────
         chunks = _group_into_chunks(verses, VERSES_PER_CHUNK)
         total_chunks = len(chunks)
 
-        # ── Step 4: Delete any previous KB rows for this version (re-seed) ────
+        # ── Step 3: Delete any previous KB rows for this version (re-seed) ────
         print(f"[{worker_id}] 🗑️  Clearing previous chunks for {abbreviation}...")
         supabase.table('knowledge_base').delete().eq(
             'bible_version_id', bible_version_id
         ).execute()
 
-        # ── Step 5: Generate embeddings in batches ────────────────────────────
+        # ── Step 4: Generate embeddings in batches ────────────────────────────
         print(f"[{worker_id}] 🧠 Generating embeddings for {total_chunks} chunks...")
         all_embeddings = []
         total_batches = (total_chunks + BATCH_SIZE - 1) // BATCH_SIZE
@@ -196,7 +377,7 @@ def process_bible(supabase, job_data: Dict[str, Any], worker_id: str):
 
         print(f"[{worker_id}] ✓ Generated {len(all_embeddings)} embeddings")
 
-        # ── Step 6: Build and insert KB records ───────────────────────────────
+        # ── Step 5: Build and insert KB records ───────────────────────────────
         print(f"[{worker_id}] 💾 Inserting chunks into knowledge_base...")
         records = []
         for chunk, embedding in zip(chunks, all_embeddings):
@@ -226,7 +407,7 @@ def process_bible(supabase, job_data: Dict[str, Any], worker_id: str):
             inserted += len(batch)
             print(f"[{worker_id}]   Inserted {inserted}/{total_chunks} chunks")
 
-        # ── Step 7: Mark completed ────────────────────────────────────────────
+        # ── Step 6: Mark completed ────────────────────────────────────────────
         _update_bible_version(
             supabase, bible_version_id, 'completed',
             chunk_count=total_chunks
