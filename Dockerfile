@@ -78,6 +78,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=preparer /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 
 COPY worker.py .
+COPY bible_seeder.py .
 COPY config.py .
 COPY ocr_processor.py .
 COPY chunker.py .
