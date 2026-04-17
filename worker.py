@@ -38,6 +38,18 @@ class PDFWorker:
         self.poll_interval = int(os.getenv('POLL_INTERVAL', '5'))  # seconds
         print(f"[{self.worker_id}] ✓ Polling processing_queue every {self.poll_interval}s")
         print(f"[{self.worker_id}] ✓ Temp directory: {TEMP_DIR}")
+
+        # ── Recover any jobs orphaned by a previous crashed worker ────────────
+        try:
+            recovered = self.supabase.table('bible_processing_queue').update({
+                'status': 'queued',
+                'updated_at': 'now()'
+            }).eq('status', 'processing').execute()
+            if recovered.data:
+                print(f"[{self.worker_id}] ♻️  Recovered {len(recovered.data)} orphaned bible job(s)")
+        except Exception as e:
+            print(f"[{self.worker_id}] ⚠️  Could not recover orphaned bible jobs: {e}")
+
         print(f"[{self.worker_id}] 🎯 Worker ready. Waiting for jobs...\n")
 
         # Initialize metrics
@@ -343,7 +355,7 @@ class PDFWorker:
         Main worker loop.
 
         Each iteration polls both queues in priority order:
-          1. processing_queue      — regular document jobs (original, unchanged)
+          1. processing_queue       — regular document jobs (original, unchanged)
           2. bible_processing_queue — bible seed jobs (new, separate table)
 
         If either queue has work the loop immediately continues without sleeping.
@@ -367,8 +379,8 @@ class PDFWorker:
 
                 if doc_result.data:
                     did_work = True
-                    job_row = doc_result.data[0]
-                    job_id  = job_row['id']
+                    job_row  = doc_result.data[0]
+                    job_id   = job_row['id']
                     job_data = job_row['job_data']
 
                     # Claim — double eq guards against concurrent workers
@@ -395,33 +407,39 @@ class PDFWorker:
                         }).eq('id', job_id).execute()
 
                 # ── 2. Bible processing queue ─────────────────────────────────
-                bible_result = (
-                    self.supabase.table('bible_processing_queue')
-                    .select('*')
-                    .eq('status', 'queued')
-                    .order('created_at')
-                    .limit(1)
-                    .execute()
-                )
+                try:
+                    bible_result = (
+                        self.supabase.table('bible_processing_queue')
+                        .select('*')
+                        .eq('status', 'queued')
+                        .order('created_at')
+                        .limit(1)
+                        .execute()
+                    )
+                    print(f"[{self.worker_id}] 🔍 Bible queue check: {len(bible_result.data)} job(s) found")
 
-                if bible_result.data:
-                    bible_row = bible_result.data[0]
-                    bible_job_id = bible_row['id']
-                    job_data     = bible_row['job_data']
+                    if bible_result.data:
+                        bible_row    = bible_result.data[0]
+                        bible_job_id = bible_row['id']
+                        job_data     = bible_row['job_data']
 
-                    # Atomic claim — skip if another worker already took it
-                    if self._claim_bible_job(bible_job_id):
-                        did_work = True
-                        print(f"[{self.worker_id}] 📖 Processing bible job {bible_job_id}")
+                        # Atomic claim — skip if another worker already took it
+                        if self._claim_bible_job(bible_job_id):
+                            did_work = True
+                            print(f"[{self.worker_id}] 📖 Processing bible job {bible_job_id}")
 
-                        try:
-                            process_bible(self.supabase, job_data, self.worker_id)
-                            self._finish_bible_job(bible_job_id, success=True)
-                            self.jobs_processed += 1
+                            try:
+                                process_bible(self.supabase, job_data, self.worker_id)
+                                self._finish_bible_job(bible_job_id, success=True)
+                                self.jobs_processed += 1
 
-                        except Exception:
-                            print(f"[{self.worker_id}] ❌ Marking bible job {bible_job_id} as failed")
-                            self._finish_bible_job(bible_job_id, success=False)
+                            except Exception:
+                                print(f"[{self.worker_id}] ❌ Marking bible job {bible_job_id} as failed")
+                                self._finish_bible_job(bible_job_id, success=False)
+
+                except Exception as e:
+                    print(f"[{self.worker_id}] ❌ Bible queue poll failed: {e}")
+                    print(traceback.format_exc())
 
                 # Sleep only when both queues were empty
                 if not did_work:
